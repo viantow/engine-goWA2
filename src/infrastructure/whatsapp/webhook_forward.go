@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,8 +19,20 @@ import (
 )
 
 var (
-	submitWebhookFn     = submitWebhook
-	getChatwootClientFn = chatwoot.GetDefaultClient
+	submitWebhookFn = submitWebhook
+	// getChatwootClientFn resolves the per-device Chatwoot destination for the
+	// forward path. Returns (nil, nil) when the device simply has no usable config
+	// (caller skips silently). Returns ErrClientRegistryUnavailable when the
+	// registry has not been initialized yet — a distinct condition that must NOT
+	// be mistaken for "no config", or a due retry would be marked done and a live
+	// forward dropped without delivery. Overridable in tests.
+	getChatwootClientFn = func(deviceID string) (*chatwoot.ResolvedConfig, error) {
+		reg := chatwoot.GetClientRegistry()
+		if reg == nil {
+			return nil, chatwoot.ErrClientRegistryUnavailable
+		}
+		return reg.Resolve(deviceID)
+	}
 	// contactDisplayNameFn resolves the operator-saved address-book name for a
 	// 1:1 JID from the WhatsApp contact store. It is a seam so tests can stub
 	// the lookup without a real client/store.
@@ -94,18 +107,37 @@ func forwardPayloadToConfiguredWebhooks(ctx context.Context, payload map[string]
 		webhookConfig = nil
 	}
 
-	webhookAllowed := isEventWhitelistedForDevice(eventName, webhookConfig) &&
-		!shouldIgnoreWebhookJID(payload)
+	jidAllowed := !shouldIgnoreWebhookJID(payload)
+	webhookAllowed := jidAllowed && isEventWhitelistedForDevice(eventName, webhookConfig)
 	chatwootAllowed := config.ChatwootEnabled && shouldForwardEventToChatwoot(eventName) && isEventWhitelistedForChatwoot(eventName)
-
-	if !webhookAllowed && !chatwootAllowed {
-		logrus.Debugf("Skipping event %s - not allowed for webhooks or Chatwoot", eventName)
-		return nil
-	}
 
 	webhookURLs := getWebhookURLsFromConfig(webhookConfig)
 	if len(webhookURLs) == 0 {
 		webhookURLs = config.WhatsappWebhook
+	}
+
+	// With WHATSAPP_WEBHOOK_DEVICE_MERGE_GLOBAL a per-device webhook is an addition
+	// to the global targets instead of a replacement: the global URLs still get the
+	// event, signed with the global secret and filtered by the global event
+	// whitelist, while the device URL keeps its own secret and event filter.
+	var globalURLs []string
+	if config.WhatsappWebhookDeviceMergeGlobal && webhookConfig != nil && jidAllowed &&
+		isEventWhitelistedForDevice(eventName, nil) {
+		// Only dedup against the device URLs when the device leg is actually going to
+		// deliver. A global URL that happens to equal the device URL is still a global
+		// subscription: if the device's own event filter rejects this event, excluding
+		// it here would drop the event entirely for a target the global config accepts.
+		deviceURLs := webhookURLs
+		if !webhookAllowed {
+			deviceURLs = nil
+		}
+		globalURLs = globalWebhookURLsExcluding(deviceURLs)
+	}
+	globalAllowed := len(globalURLs) > 0
+
+	if !webhookAllowed && !globalAllowed && !chatwootAllowed {
+		logrus.Debugf("Skipping event %s - not allowed for webhooks or Chatwoot", eventName)
+		return nil
 	}
 
 	// Enrich the payload with the operator-facing session id so multi-tenant
@@ -113,15 +145,46 @@ func forwardPayloadToConfiguredWebhooks(ctx context.Context, payload map[string]
 	// back to the session id they registered via POST /devices. Done here,
 	// synchronously, before the Chatwoot goroutine is spawned below, so the
 	// shared payload map is never mutated concurrently.
-	if webhookAllowed {
+	if webhookAllowed || globalAllowed {
 		addWebhookSessionID(payload)
+	}
+
+	// Run the two legs concurrently. They share the caller's deadline, and each URL
+	// can spend up to ~15s in retry backoff, so running the device leg first would
+	// let one slow endpoint consume the whole budget and leave the global leg a dead
+	// context — precisely the silent drop this flag exists to prevent. Both legs only
+	// read the payload from here on, so sharing it is safe.
+	var (
+		globalErr  error
+		globalDone chan struct{}
+	)
+	if globalAllowed {
+		globalDone = make(chan struct{})
+		go func() {
+			defer close(globalDone)
+			globalErr = forwardToWebhooks(ctx, payload, eventName, globalURLs, nil)
+		}()
 	}
 
 	var webhookErr error
 	if webhookAllowed {
 		webhookErr = forwardToWebhooks(ctx, payload, eventName, webhookURLs, webhookConfig)
-	} else {
+	} else if chatwootAllowed {
 		logrus.Debugf("Skipping event %s for configured webhooks, but allowing Chatwoot", eventName)
+	}
+
+	if globalAllowed {
+		<-globalDone
+		// Same contract as forwardToWebhooks: only report failure when every
+		// target that was attempted failed.
+		switch {
+		case !webhookAllowed:
+			webhookErr = globalErr
+		case webhookErr != nil && globalErr != nil:
+			webhookErr = fmt.Errorf("%w; global: %v", webhookErr, globalErr)
+		default:
+			webhookErr = nil
+		}
 	}
 
 	if chatwootAllowed {
@@ -177,6 +240,23 @@ func getWebhookURLsFromConfig(config *domainChatStorage.DeviceWebhookConfig) []s
 		return nil
 	}
 	return []string{*config.WebhookURL}
+}
+
+// globalWebhookURLsExcluding returns the global WHATSAPP_WEBHOOK targets minus any
+// URL already covered by the device-specific delivery, so a device whose webhook
+// duplicates a global URL is not hit twice for the same event.
+func globalWebhookURLsExcluding(deviceURLs []string) []string {
+	if len(config.WhatsappWebhook) == 0 {
+		return nil
+	}
+	urls := make([]string, 0, len(config.WhatsappWebhook))
+	for _, url := range config.WhatsappWebhook {
+		if slices.Contains(deviceURLs, url) {
+			continue
+		}
+		urls = append(urls, url)
+	}
+	return urls
 }
 
 // isEventWhitelistedForDevice checks if an event is whitelisted for a specific device.
@@ -478,7 +558,11 @@ func buildChatwootMessageContent(data map[string]any, isGroup bool, fromName str
 	}
 	prefixGroupSender := isGroup && !fromMe && senderLabel != ""
 
-	if body, ok := data["body"].(string); ok && body != "" {
+	// Interactive messages carry the same summary as body, but it has always
+	// been forwarded without the markdown pass below.
+	if interactive, ok := data["interactive"].(string); ok && interactive != "" {
+		content = interactive
+	} else if body, ok := data["body"].(string); ok && body != "" {
 		// Translate WhatsApp formatting (*bold*, _italic_, ~strike~) into the
 		// GitHub-flavored markdown Chatwoot renders so emphasis survives the hop.
 		content = utils.WhatsAppToChatwootMarkdown(body)
@@ -513,6 +597,30 @@ func buildChatwootMessageContent(data map[string]any, isGroup bool, fromName str
 		}
 		attachments = append(attachments, path)
 		logrus.Infof("Chatwoot: Found %s attachment at %s", field, path)
+	}
+
+	// interactive_media carries zero or more paths collected from an
+	// InteractiveMessage's header and, for carousels, every card's header
+	// (see collectInteractiveMedia in event_message.go) — a plain []string
+	// rather than one of the singular mediaFields above, since a carousel
+	// can have media on more than one card and reusing e.g. "image" would
+	// have each extraction overwrite the last. []any covers the shape after
+	// a JSON round-trip on the Chatwoot forward retry path.
+	switch paths := data["interactive_media"].(type) {
+	case []string:
+		for _, path := range paths {
+			if path != "" {
+				attachments = append(attachments, path)
+				logrus.Infof("Chatwoot: Found interactive media attachment at %s", path)
+			}
+		}
+	case []any:
+		for _, v := range paths {
+			if path, ok := v.(string); ok && path != "" {
+				attachments = append(attachments, path)
+				logrus.Infof("Chatwoot: Found interactive media attachment at %s", path)
+			}
+		}
 	}
 
 	// Handle empty content
@@ -564,22 +672,21 @@ func isEventWhitelistedForChatwoot(eventName string) bool {
 	return false
 }
 
+// buildReactionChatwootContent renders the note posted for a reaction event.
+// It never mentions the WhatsApp message id: whenever reacted_message_id is
+// present, syncPayloadToChatwoot already threads this note onto the
+// reacted-to message via ContentAttributes.in_reply_to_external_id, so
+// Chatwoot nests it under that message's bubble - repeating the raw id in
+// the text would just be noise. When reacted_message_id is absent the note
+// is posted standalone, un-threaded, but still readable.
 func buildReactionChatwootContent(data map[string]any, fromName string) string {
 	reaction, _ := data["reaction"].(string)
-	reactedMessageID, _ := data["reacted_message_id"].(string)
 
 	actor := "Someone"
 	if fromName != "" {
 		actor = fromName
 	} else if from, ok := data["from"].(string); ok && from != "" {
 		actor = utils.ExtractPhoneFromJID(from)
-	}
-
-	if reactedMessageID != "" {
-		if reaction == "" {
-			return fmt.Sprintf("%s removed a reaction from message %s", actor, reactedMessageID)
-		}
-		return fmt.Sprintf("%s reacted %s to message %s", actor, reaction, reactedMessageID)
 	}
 
 	if reaction == "" {
@@ -749,7 +856,7 @@ func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, conte
 	if err != nil {
 		return nil, fmt.Errorf("failed to create message: %w", err)
 	}
-	chatwoot.MarkMessageAsSent(msgID)
+	chatwoot.MarkMessageAsSent(cw.AccountID, msgID)
 
 	logrus.Infof("Chatwoot: Message synced successfully for %s", info.Identifier)
 	return &chatwootSyncResult{
@@ -777,7 +884,7 @@ func chatwootLinkStorageFromContext(ctx context.Context) (string, domainChatStor
 	return deviceID, instance.GetChatStorage()
 }
 
-func buildChatwootForwardMessageLink(deviceID string, data map[string]any, opts chatwoot.MessageOptions, result *chatwootSyncResult) *domainChatStorage.ChatwootMessageLink {
+func buildChatwootForwardMessageLink(deviceID string, configID int64, accountID int, data map[string]any, opts chatwoot.MessageOptions, result *chatwootSyncResult) *domainChatStorage.ChatwootMessageLink {
 	if result == nil || deviceID == "" || result.MessageID == 0 {
 		return nil
 	}
@@ -798,6 +905,8 @@ func buildChatwootForwardMessageLink(deviceID string, data map[string]any, opts 
 		SourceID:                     opts.SourceID,
 		Direction:                    chatwootMessageTypeFromPayload(data),
 		IsRead:                       false,
+		ChatwootConfigID:             configID,
+		ChatwootAccountID:            accountID,
 	}
 }
 
@@ -864,6 +973,12 @@ func syncReadReceiptsToChatwoot(cw *chatwoot.Client, deviceID string, linkRepo d
 		if link == nil || link.ChatwootConversationID == 0 {
 			continue
 		}
+		if !chatwootLinkMatchesClient(link, cw) {
+			// The link was written under a different Chatwoot account (e.g. before
+			// a delete-and-recreate rebind): its conversation id means nothing on
+			// the current destination.
+			continue
+		}
 
 		sourceID := link.ChatwootContactInboxSourceID
 		if sourceID == "" {
@@ -902,12 +1017,29 @@ func deleteLinkedChatwootMessage(cw *chatwoot.Client, deviceID string, linkRepo 
 	if link == nil || link.ChatwootConversationID == 0 || link.ChatwootMessageID == 0 {
 		return false
 	}
+	if !chatwootLinkMatchesClient(link, cw) {
+		// Cross-account link (pre-rebind): the (conversation, message) ids would
+		// address an unrelated message on the current destination.
+		return false
+	}
 
 	if err := cw.DeleteMessage(link.ChatwootConversationID, link.ChatwootMessageID); err != nil {
 		logrus.Errorf("Chatwoot: Failed to delete Chatwoot message %d for WhatsApp %s: %v", link.ChatwootMessageID, targetID, err)
 		return false
 	}
 	return true
+}
+
+// chatwootLinkMatchesClient reports whether a stored message link belongs to
+// the Chatwoot account the client is bound to. Links with account id 0
+// (pre-migration legacy rows not yet backfilled) are accepted for
+// compatibility; any other mismatch means the link predates a rebind and its
+// Chatwoot ids must not be replayed against the current destination.
+func chatwootLinkMatchesClient(link *domainChatStorage.ChatwootMessageLink, cw *chatwoot.Client) bool {
+	if link == nil || cw == nil {
+		return false
+	}
+	return link.ChatwootAccountID == 0 || link.ChatwootAccountID == cw.AccountID
 }
 
 func chatwootForwardMessageID(payload map[string]any) string {
@@ -992,13 +1124,21 @@ func enqueueChatwootForwardRetry(linkRepo domainChatStorage.IChatStorageReposito
 }
 
 func syncPayloadToChatwoot(ctx context.Context, payload map[string]any, eventName, deviceID string, linkRepo domainChatStorage.IChatStorageRepository) error {
-	cw := getChatwootClientFn()
-	if cw == nil {
-		logrus.Warn("Chatwoot: Client is not initialized")
+	resolved, err := getChatwootClientFn(deviceID)
+	if err != nil {
+		// Transient resolution failure (e.g. storage error): let the caller retry.
+		logrus.Warnf("Chatwoot: failed to resolve client for device %s: %v", deviceID, err)
+		return err
+	}
+	if resolved == nil || resolved.Client == nil {
+		// No Chatwoot config maps to this device (and env fallback does not apply).
+		// Skip silently — this is fail-fast, not an error to retry.
+		logrus.Debugf("Chatwoot: no Chatwoot config for device %s; skipping forward", deviceID)
 		return nil
 	}
+	cw := resolved.Client
 	if !cw.IsConfigured() {
-		logrus.Warn("Chatwoot: Client is not configured (check CHATWOOT_* env vars)")
+		logrus.Warn("Chatwoot: Client is not configured (check CHATWOOT_* env vars or device config)")
 		return nil
 	}
 
@@ -1088,7 +1228,7 @@ func syncPayloadToChatwoot(ctx context.Context, payload map[string]any, eventNam
 		return err
 	}
 	if eventName == "message" && linkRepo != nil {
-		if link := buildChatwootForwardMessageLink(deviceID, data, msgOpts, result); link != nil {
+		if link := buildChatwootForwardMessageLink(deviceID, resolved.ConfigID, cw.AccountID, data, msgOpts, result); link != nil {
 			if err := linkRepo.UpsertChatwootMessageLink(link); err != nil {
 				logrus.Errorf("Chatwoot: Failed to store message link for %s: %v", link.WhatsAppMessageID, err)
 			}
@@ -1114,7 +1254,17 @@ func processChatwootForwardRetryEvent(repo domainChatStorage.IChatStorageReposit
 	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
 		return fmt.Errorf("decode retry payload %d: %w", event.ID, err)
 	}
-	return syncPayloadToChatwoot(context.Background(), payload, event.EventName, event.DeviceID, repo)
+	// Rebuild the device context the live path had: group-name and avatar
+	// lookups resolve the WhatsApp client from the context and would otherwise
+	// fall back to the global default device — the wrong client in multi-device
+	// deployments.
+	ctx := context.Background()
+	if dm := GetDeviceManager(); dm != nil {
+		if instance, _, err := dm.ResolveDevice(event.DeviceID); err == nil && instance != nil {
+			ctx = ContextWithDevice(ctx, instance)
+		}
+	}
+	return syncPayloadToChatwoot(ctx, payload, event.EventName, event.DeviceID, repo)
 }
 
 func processDueChatwootForwardRetries(repo domainChatStorage.IChatStorageRepository) {
