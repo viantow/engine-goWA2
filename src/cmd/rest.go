@@ -368,3 +368,9 @@ func newBasicAuthMiddleware(accounts map[string]string) fiber.Handler {
 		},
 	})
 }
+
+// StartServer starts the Fiber REST server in-process directly
+func StartServer() {
+	restServer(nil, nil)
+}
+
