@@ -1,4 +1,4 @@
-# PowerShell Script to Sync and Update engine_goWA with Upstream Repository
+﻿# PowerShell Script to Sync and Update engine_goWA with Upstream Repository
 # Save this file as 'update_upstream.ps1' in the scripts folder of engine_goWA
 
 $ErrorActionPreference = "Stop"
@@ -90,6 +90,24 @@ try {
         Write-Host "   git commit -m 'resolve merge conflicts with upstream'" -ForegroundColor Yellow
         Write-Host "==========================================================" -ForegroundColor Red
     } else {
+        # 7. Post-Merge Verification: Enforce IWANA Branding Policy
+        Write-Host "[INFO] Memeriksa kepatuhan branding IWANA..." -ForegroundColor Yellow
+        $settingsFile = "$PSScriptRoot/../src/config/settings.go"
+        if (Test-Path $settingsFile) {
+            $content = Get-Content $settingsFile -Raw
+            if ($content -match 'AppOs\s*=\s*"GOWA"') {
+                Write-Host "[WARN] Upstream menimpa branding menjadi GOWA! Memulihkan branding ke IWANA..." -ForegroundColor Yellow
+                $content = $content -replace 'AppOs\s*=\s*"GOWA"', 'AppOs                  = "IWANA"'
+                $content = $content -replace 'AppVersion\s*=\s*"v[^"]*"', 'AppVersion             = ""'
+                Set-Content -Path $settingsFile -Value $content -NoNewline
+                git add $settingsFile
+                git commit -m "chore: preserve IWANA branding after upstream sync"
+                Write-Host "[SUCCESS] Branding IWANA berhasil dipertahankan." -ForegroundColor Green
+            } else {
+                Write-Host "[SUCCESS] Branding IWANA terjaga dengan baik." -ForegroundColor Green
+            }
+        }
+
         Write-Host "==========================================================" -ForegroundColor Green
         Write-Host "🎉 PENGGABUNGAN SUKSES!" -ForegroundColor Green
         Write-Host "==========================================================" -ForegroundColor Green

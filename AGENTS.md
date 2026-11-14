@@ -59,6 +59,13 @@ enabled; both transports share the same device manager and usecases.
   only when explicitly invoked. For an existing release's notes, use
   [update-release-note](.agents/skills/update-release-note/SKILL.md).
 
+## Companion Device Branding & Upstream Merge Invariants (`IWANA`)
+
+- **Device Name**: Companion device branding for WhatsApp Web (`store.DeviceProps.Os`) must default to `IWANA`.
+- **Config Invariants**: In `src/config/settings.go`, `AppOs = "IWANA"` and `AppVersion = ""`.
+- **Viper Bindings**: In `src/cmd/root.go`, keep `app_os` and `app_version` env bindings active so container environments can override them dynamically.
+- **Upstream Merges**: When syncing or merging from upstream (`aldinokemal/go-whatsapp-web-multidevice`), do NOT allow upstream commits to revert `AppOs` back to `"GOWA"` or reintroduce hardcoded `"GOWA v..."` strings in `device_manager.go` or `init.go`.
+
 ## Cross-layer contracts
 
 - Keep transport parsing in `ui/`, orchestration in `usecase/`, and DTOs/interfaces
