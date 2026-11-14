@@ -7,11 +7,11 @@ import (
 )
 
 var (
-	AppVersion             = "v9.9.0"
+	AppVersion             = ""
 	AppPort                = "3000"
 	AppHost                = "0.0.0.0"
 	AppDebug               = false
-	AppOs                  = "GOWA"
+	AppOs                  = "IWANA"
 	AppPlatform            = waCompanionReg.DeviceProps_PlatformType(1)
 	AppBasicAuthCredential []string
 	// AppAllowUnauthenticated exposes device admin, send, logout, and MCP

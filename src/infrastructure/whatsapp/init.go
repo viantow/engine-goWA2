@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,7 +84,7 @@ func InitWaCLI(ctx context.Context, storeContainer, keysStoreContainer *sqlstore
 	}
 
 	// Configure device properties
-	osName := fmt.Sprintf("%s %s", config.AppOs, config.AppVersion)
+	osName := strings.TrimSpace(fmt.Sprintf("%s %s", config.AppOs, config.AppVersion))
 	store.DeviceProps.PlatformType = &config.AppPlatform
 	store.DeviceProps.Os = &osName
 
