@@ -281,18 +281,20 @@ func (service serviceSend) wrapSendMessage(ctx context.Context, client *whatsmeo
 	// The budget must survive chat-storage write contention (history sync batches
 	// hold the SQLite writer for a while; busy_timeout is 30s) — with a short
 	// deadline the sent message is silently missing from the chat viewer.
-	go func() {
-		storeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-		defer cancel()
+	if !config.WhatsappDisableMessageStorage {
+		go func() {
+			storeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
 
-		if err := service.chatStorageRepo.StoreSentMessageWithContext(storeCtx, ts.ID, senderJID, recipient.String(), content, ts.Timestamp, msg); err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				logrus.Warnf("Timeout storing sent message %s to %s", ts.ID, recipient.String())
-			} else {
-				logrus.Warnf("Failed to store sent message %s to %s: %v", ts.ID, recipient.String(), err)
+			if err := service.chatStorageRepo.StoreSentMessageWithContext(storeCtx, ts.ID, senderJID, recipient.String(), content, ts.Timestamp, msg); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					logrus.Warnf("Timeout storing sent message %s to %s", ts.ID, recipient.String())
+				} else {
+					logrus.Warnf("Failed to store sent message %s to %s: %v", ts.ID, recipient.String(), err)
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return ts, nil
 }

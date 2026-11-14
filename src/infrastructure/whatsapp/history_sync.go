@@ -24,6 +24,12 @@ func handleHistorySync(ctx context.Context, evt *events.HistorySync, chatStorage
 		log.Warnf("Skipping history sync handling: WhatsApp client not initialized")
 		return
 	}
+
+	if config.WhatsappDisableHistorySync {
+		log.Debugf("History sync skipped (WhatsappDisableHistorySync is enabled)")
+		return
+	}
+
 	id := atomic.AddInt32(&historySyncID, 1)
 	fileName := fmt.Sprintf("%s/history-%d-%s-%d-%s.json",
 		config.PathStorages,

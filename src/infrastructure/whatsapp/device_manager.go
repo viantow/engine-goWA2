@@ -833,6 +833,10 @@ func (m *DeviceManager) EnsureClient(ctx context.Context, deviceID string) (*Dev
 		return nil, fmt.Errorf("failed to configure keys store: %w", err)
 	}
 
+	if config.WhatsappDisableContactStorage {
+		storeDevice.Contacts = NewMemoryContactStore()
+	}
+
 	baseLogger := waLog.Stdout(fmt.Sprintf("Client-%s", deviceID), config.WhatsappLogLevel, true)
 	client := whatsmeow.NewClient(storeDevice, newFilteredLogger(baseLogger))
 	if proxyURL := config.WhatsappProxy; proxyURL != "" {

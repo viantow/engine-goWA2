@@ -154,10 +154,22 @@ func initEnvConfig() {
 	if envDBKEYSURI := viper.GetString("db_keys_uri"); envDBKEYSURI != "" {
 		config.DBKeysURI = envDBKEYSURI
 	}
+	if envChatStorageURI := viper.GetString("chat_storage_uri"); envChatStorageURI != "" {
+		config.ChatStorageURI = envChatStorageURI
+	}
 	if viper.IsSet("chat_storage_max_open_conns") {
 		if n := viper.GetInt("chat_storage_max_open_conns"); n > 0 {
 			config.ChatStorageMaxOpenConns = n
 		}
+	}
+	if viper.IsSet("whatsapp_disable_message_storage") {
+		config.WhatsappDisableMessageStorage = viper.GetBool("whatsapp_disable_message_storage")
+	}
+	if viper.IsSet("whatsapp_disable_history_sync") {
+		config.WhatsappDisableHistorySync = viper.GetBool("whatsapp_disable_history_sync")
+	}
+	if viper.IsSet("whatsapp_disable_contact_storage") {
+		config.WhatsappDisableContactStorage = viper.GetBool("whatsapp_disable_contact_storage")
 	}
 
 	// WhatsApp settings
@@ -432,6 +444,30 @@ func initFlags() {
 		"db-keys-uri", "",
 		config.DBKeysURI,
 		`the database uri to store the optional keys cache (by default, we'll use the same database uri). avoid in-memory storage in production. database uri --db-keys-uri <string> | example: --db-keys-uri="file:storages/whatsapp-keys.db?_foreign_keys=on"`,
+	)
+	rootCmd.PersistentFlags().StringVarP(
+		&config.ChatStorageURI,
+		"chat-storage-uri", "",
+		config.ChatStorageURI,
+		`the database uri for chat storage (messages, devices, scheduled sends). database uri --chat-storage-uri <string> | example: --chat-storage-uri="file:storages/chatstorage.db"`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappDisableMessageStorage,
+		"disable-message-storage", "",
+		config.WhatsappDisableMessageStorage,
+		`disable saving incoming/outgoing messages and reactions to database --disable-message-storage <true/false>`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappDisableHistorySync,
+		"disable-history-sync", "",
+		config.WhatsappDisableHistorySync,
+		`disable saving history sync JSON dumps and history sync messages to database --disable-history-sync <true/false>`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappDisableContactStorage,
+		"disable-contact-storage", "",
+		config.WhatsappDisableContactStorage,
+		`disable persisting contacts into database (keeps them in-memory only) --disable-contact-storage <true/false>`,
 	)
 
 	// WhatsApp flags

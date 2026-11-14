@@ -99,6 +99,10 @@ func InitWaCLI(ctx context.Context, storeContainer, keysStoreContainer *sqlstore
 		applyKeyCacheStore(device, innerStore)
 	}
 
+	if config.WhatsappDisableContactStorage {
+		device.Contacts = NewMemoryContactStore()
+	}
+
 	instanceID := ""
 	if device.ID != nil {
 		instanceID = device.ID.String()

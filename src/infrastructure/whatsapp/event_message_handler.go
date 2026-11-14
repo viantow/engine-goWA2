@@ -37,18 +37,22 @@ func handleMessage(ctx context.Context, evt *events.Message, chatStorageRepo dom
 	pollPayload := preparePollWebhookPayload(ctx, client, chatStorageRepo, evt)
 
 	if isReactionMessage(evt) {
-		ctx = withRemovedReactionEmoji(ctx, evt, chatStorageRepo)
-		if err := chatStorageRepo.CreateReaction(ctx, evt); err != nil {
-			log.Errorf("Failed to store incoming reaction %s: %v", sanitizeLogText(evt.Info.ID), err)
+		if !config.WhatsappDisableMessageStorage {
+			ctx = withRemovedReactionEmoji(ctx, evt, chatStorageRepo)
+			if err := chatStorageRepo.CreateReaction(ctx, evt); err != nil {
+				log.Errorf("Failed to store incoming reaction %s: %v", sanitizeLogText(evt.Info.ID), err)
+			}
 		}
 
 		handleWebhookForward(ctx, evt, client, pollPayload)
 		return
 	}
 
-	if err := chatStorageRepo.CreateMessage(ctx, evt); err != nil {
-		// Log storage errors to avoid silent failures that could lead to data loss
-		log.Errorf("Failed to store incoming message %s: %v", sanitizeLogText(evt.Info.ID), err)
+	if !config.WhatsappDisableMessageStorage {
+		if err := chatStorageRepo.CreateMessage(ctx, evt); err != nil {
+			// Log storage errors to avoid silent failures that could lead to data loss
+			log.Errorf("Failed to store incoming message %s: %v", sanitizeLogText(evt.Info.ID), err)
+		}
 	}
 
 	// Handle image message if present

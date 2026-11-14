@@ -95,6 +95,11 @@ var (
 	ChatStorageEnableWAL         = true
 	ChatStorageMaxOpenConns      = 5 // Max concurrent SQLite connections for chat storage (WAL allows concurrent readers + 1 writer)
 
+	// Zero-storage privacy settings
+	WhatsappDisableMessageStorage = false // When true, incoming & outgoing messages/reactions are not persisted to database
+	WhatsappDisableHistorySync    = false // When true, history sync dumps (*.json) and history processing are bypassed
+	WhatsappDisableContactStorage = false // When true, contacts are kept in-memory only and never persisted to database
+
 	ChatwootEnabled   = false
 	ChatwootURL       = ""
 	ChatwootAPIToken  = ""
