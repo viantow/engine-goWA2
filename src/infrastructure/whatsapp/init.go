@@ -3,9 +3,7 @@ package whatsapp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -13,7 +11,6 @@ import (
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -83,10 +80,8 @@ func InitWaCLI(ctx context.Context, storeContainer, keysStoreContainer *sqlstore
 		panic("No device found")
 	}
 
-	// Configure device properties
-	osName := strings.TrimSpace(fmt.Sprintf("%s %s", config.AppOs, config.AppVersion))
-	store.DeviceProps.PlatformType = &config.AppPlatform
-	store.DeviceProps.Os = &osName
+	configureDeviceProps()
+
 
 	// Keep references for global state update after client creation
 	primaryDB := storeContainer
