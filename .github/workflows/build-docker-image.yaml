@@ -9,8 +9,7 @@ on:
         default: false
   push:
     tags:
-      - "v*.*.*"
-      - "src/v*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
     branches-ignore:
       - "*"
 
@@ -25,7 +24,7 @@ jobs:
       packages: write
     steps:
       - name: Load Docker Hub credentials from 1Password
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
@@ -33,12 +32,12 @@ jobs:
           REGISTRY_USERNAME: op://GOWA-OSS/RegistryGithub/username
           REGISTRY_PASSWORD: op://GOWA-OSS/RegistryGithub/token
       - name: Login Docker Hub
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ env.REGISTRY_PASSWORD }}
       - name: Login GitHub Container Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -55,9 +54,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - name: Load Docker Hub credentials from 1Password
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
@@ -65,20 +64,20 @@ jobs:
           REGISTRY_USERNAME: op://GOWA-OSS/RegistryGithub/username
           REGISTRY_PASSWORD: op://GOWA-OSS/RegistryGithub/token
       - name: Login Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ env.REGISTRY_PASSWORD }}
       - name: Login GitHub Container Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        uses: docker/setup-buildx-action@v4
       - name: Build and push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        uses: docker/build-push-action@v7
         with:
           push: true
           context: .
@@ -107,9 +106,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - name: Load Docker Hub credentials from 1Password
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
@@ -117,25 +116,25 @@ jobs:
           REGISTRY_USERNAME: op://GOWA-OSS/RegistryGithub/username
           REGISTRY_PASSWORD: op://GOWA-OSS/RegistryGithub/token
       - name: Login Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ env.REGISTRY_PASSWORD }}
       - name: Login GitHub Container Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up QEMU
         if: matrix.qemu_platforms != ''
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: ${{ matrix.qemu_platforms }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        uses: docker/setup-buildx-action@v4
       - name: Build and push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        uses: docker/build-push-action@v7
         with:
           push: true
           context: .
@@ -155,7 +154,7 @@ jobs:
       packages: write
     steps:
       - name: Load Docker Hub credentials from 1Password
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
@@ -163,18 +162,18 @@ jobs:
           REGISTRY_USERNAME: op://GOWA-OSS/RegistryGithub/username
           REGISTRY_PASSWORD: op://GOWA-OSS/RegistryGithub/token
       - name: Login Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ env.REGISTRY_PASSWORD }}
       - name: Login GitHub Container Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        uses: docker/setup-buildx-action@v4
       - name: Create Versioned Manifest (${{ github.ref_name }})
         run: |
           docker buildx imagetools create -t ${REGISTRY_USERNAME}/go-whatsapp-web-multidevice:${{ github.ref_name }} \
