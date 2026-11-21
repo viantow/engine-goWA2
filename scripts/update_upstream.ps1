@@ -108,6 +108,54 @@ try {
             }
         }
 
+        # 7b. Post-Merge Verification: Enforce Zero-Storage Privacy Policy
+        Write-Host "[INFO] Memeriksa kepatuhan zero-storage (chat & nomor WhatsApp)..." -ForegroundColor Yellow
+        $settingsFile = "$PSScriptRoot/../src/config/settings.go"
+        if (Test-Path $settingsFile) {
+            $content = Get-Content $settingsFile -Raw
+            $restored = $false
+            foreach ($flag in @("WhatsappDisableMessageStorage", "WhatsappDisableHistorySync", "WhatsappDisableContactStorage")) {
+                $pattern = "$flag\s*=\s*false"
+                if ($content -match $pattern) {
+                    $content = $content -replace $pattern, "$flag = true"
+                    $restored = $true
+                }
+            }
+            if ($restored) {
+                Write-Host "[WARN] Upstream menimpa zero-storage menjadi false! Memulihkan ke true..." -ForegroundColor Yellow
+                Set-Content -Path $settingsFile -Value $content -NoNewline
+                git add $settingsFile
+                git commit -m "chore: preserve zero-storage privacy after upstream sync"
+                Write-Host "[SUCCESS] Zero-storage dipulihkan." -ForegroundColor Green
+            } else {
+                Write-Host "[SUCCESS] Zero-storage terjaga (chat & nomor tidak disimpan)." -ForegroundColor Green
+            }
+        }
+
+        # 7c. Pastikan env example memuat flag zero-storage
+        $envExample = "$PSScriptRoot/../src/.env.example"
+        if (Test-Path $envExample) {
+            $envContent = Get-Content $envExample -Raw
+            $need = @(
+                "WHATSAPP_DISABLE_MESSAGE_STORAGE=true",
+                "WHATSAPP_DISABLE_HISTORY_SYNC=true",
+                "WHATSAPP_DISABLE_CONTACT_STORAGE=true"
+            )
+            $missing = @()
+            foreach ($line in $need) {
+                if ($envContent -notmatch [regex]::Escape($line)) { $missing += $line }
+            }
+            if ($missing.Count -gt 0) {
+                Write-Host "[WARN] env example kehilangan flag zero-storage. Menambahkan kembali..." -ForegroundColor Yellow
+                Add-Content -Path $envExample -Value ("`n# Zero-storage privacy invariants (IWANA)`n" + ($missing -join "`n"))
+                git add $envExample
+                git commit -m "chore: restore zero-storage env keys after upstream sync"
+                Write-Host "[SUCCESS] Flag zero-storage ditambahkan kembali." -ForegroundColor Green
+            } else {
+                Write-Host "[SUCCESS] env example zero-storage lengkap." -ForegroundColor Green
+            }
+        }
+
         Write-Host "==========================================================" -ForegroundColor Green
         Write-Host "🎉 PENGGABUNGAN SUKSES!" -ForegroundColor Green
         Write-Host "==========================================================" -ForegroundColor Green

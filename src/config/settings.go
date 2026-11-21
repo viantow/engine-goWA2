@@ -95,10 +95,11 @@ var (
 	ChatStorageEnableWAL         = true
 	ChatStorageMaxOpenConns      = 5 // Max concurrent SQLite connections for chat storage (WAL allows concurrent readers + 1 writer)
 
-	// Zero-storage privacy settings
-	WhatsappDisableMessageStorage = false // When true, incoming & outgoing messages/reactions are not persisted to database
-	WhatsappDisableHistorySync    = false // When true, history sync dumps (*.json) and history processing are bypassed
-	WhatsappDisableContactStorage = false // When true, contacts are kept in-memory only and never persisted to database
+	// Zero-storage privacy invariants (do not let upstream sync revert these).
+	// IWANA never persists chat content, contacts/phone numbers, or history dumps.
+	WhatsappDisableMessageStorage = true // incoming & outgoing messages/reactions are NOT persisted
+	WhatsappDisableHistorySync    = true // history sync dumps (*.json) and processing are bypassed
+	WhatsappDisableContactStorage = true // contacts are in-memory only, never persisted
 
 	ChatwootEnabled   = false
 	ChatwootURL       = ""

@@ -66,6 +66,23 @@ enabled; both transports share the same device manager and usecases.
 - **Viper Bindings**: In `src/cmd/root.go`, keep `app_os` and `app_version` env bindings active so container environments can override them dynamically.
 - **Upstream Merges**: When syncing or merging from upstream (`aldinokemal/go-whatsapp-web-multidevice`), do NOT allow upstream commits to revert `AppOs` back to `"GOWA"` or reintroduce hardcoded `"GOWA v..."` strings in `device_manager.go` or `init.go`.
 
+## Zero-Storage Privacy Invariants (IWANA)
+
+- **No chat persistence**: `src/config/settings.go` must keep
+  `WhatsappDisableMessageStorage = true`, `WhatsappDisableHistorySync = true`,
+  and `WhatsappDisableContactStorage = true`. Incoming/outgoing messages,
+  reactions, history dumps, and contacts/phone numbers are never written to
+  database — they stay in memory only for the active session.
+- **Env example**: `src/.env.example` must document the three
+  `WHATSAPP_DISABLE_*` keys with value `true`.
+- **Upstream merges**: when syncing from upstream, do NOT allow these defaults
+  to revert to `false`, and do NOT remove the three env keys. The
+  `scripts/update_upstream.ps1` script restores them automatically after merge.
+- **Runtime override**: `docker-compose.yml` and any deployment env must set
+  the three keys to `true`. Never set them to `false` in a committed file.
+- **Verification**: after an upstream sync, run `go vet ./...` in `src/` and
+  grep settings.go to confirm all three flags are still `true`.
+
 ## Cross-layer contracts
 
 - Keep transport parsing in `ui/`, orchestration in `usecase/`, and DTOs/interfaces
