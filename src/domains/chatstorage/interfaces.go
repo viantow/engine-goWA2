@@ -9,6 +9,13 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
+// DeliveredReplyLookup is an optional reverse route for repositories that
+// retain delivered agent replies. Other repositories use normal contact routing.
+type DeliveredReplyLookup interface {
+	// GetLatestOutgoingChatwootMessageLinkByChat finds a delivered agent reply in the exact scope.
+	GetLatestOutgoingChatwootMessageLinkByChat(deviceID, waChatJID string, configID int64, accountID, inboxID int) (*ChatwootMessageLink, error)
+}
+
 type IChatStorageRepository interface {
 	// Chat operations
 	CreateMessage(ctx context.Context, evt *events.Message) error
@@ -18,6 +25,10 @@ type IChatStorageRepository interface {
 	// CreateIncomingCallRecord persists an incoming call as a synthetic message (media_type "call") for chat history.
 	CreateIncomingCallRecord(ctx context.Context, evt *events.CallOffer, autoRejected bool) error
 	StoreChat(chat *Chat) error
+	// UpdateGroupSubject renames an existing group for one device and reports whether the row exists.
+	UpdateGroupSubject(deviceID, groupJID, subject string) (bool, error)
+	// FillGroupSubject replaces a generated or empty name after a background lookup.
+	FillGroupSubject(deviceID, groupJID, subject string) error
 	// GetChat matches a JID on any device. Not for user-facing flows: use
 	// GetChatByDevice.
 	GetChat(jid string) (*Chat, error)

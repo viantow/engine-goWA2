@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -55,102 +56,6 @@ const mutexShardCount = 64
 // contactMutexShards provides sharded locks to prevent race conditions when creating Chatwoot contacts.
 // This approach prevents memory leaks that would occur with a sync.Map that grows indefinitely.
 var contactMutexShards [mutexShardCount]sync.Mutex
-
-// groupNameCacheKey identifies a cached group name. A subject belongs to the
-// account that read it: another account may not be in the group at all, so a
-// name is never shared between devices.
-type groupNameCacheKey struct {
-	deviceID string
-	groupJID string
-}
-
-// groupNameCacheEntry holds cached group name with expiration time
-type groupNameCacheEntry struct {
-	name       string
-	expiresAt  time.Time
-	fetchToken *int
-}
-
-var (
-	// groupNameCache provides TTL-based caching for group names to reduce WhatsApp API calls
-	groupNameCache    sync.Map
-	groupNameCacheTTL = 5 * time.Minute
-
-	// fetchGroupInfoFn asks WhatsApp for a group's info as the given client. It
-	// is a seam so tests can answer per device without a live connection.
-	fetchGroupInfoFn = func(ctx context.Context, client *whatsmeow.Client, jid types.JID) (*types.GroupInfo, error) {
-		return client.GetGroupInfo(ctx, jid)
-	}
-)
-
-// groupNameCacheDeviceID returns the identity a client's group names are cached
-// under: its own account JID, the same identity chat storage files rows under.
-// A client that is not logged in has none and never uses the cache.
-func groupNameCacheDeviceID(client *whatsmeow.Client) string {
-	if client == nil || client.Store == nil || client.Store.ID == nil {
-		return ""
-	}
-	return client.Store.ID.ToNonAD().String()
-}
-
-// getCachedGroupName retrieves the name one device cached for a group, if not
-// expired. Returns empty string and false if not cached or expired.
-func getCachedGroupName(deviceID, groupJID string) (string, bool) {
-	if deviceID == "" {
-		return "", false
-	}
-	key := groupNameCacheKey{deviceID: deviceID, groupJID: groupJID}
-	if entry, ok := groupNameCache.Load(key); ok {
-		cached := entry.(groupNameCacheEntry)
-		if time.Now().Before(cached.expiresAt) {
-			return cached.name, true
-		}
-		// Entry expired, delete it
-		groupNameCache.Delete(key)
-	}
-	return "", false
-}
-
-// setCachedGroupName stores a group name for one device with TTL.
-func setCachedGroupName(deviceID, groupJID, name string) {
-	if deviceID == "" {
-		return
-	}
-	groupNameCache.Store(groupNameCacheKey{deviceID: deviceID, groupJID: groupJID}, groupNameCacheEntry{
-		name:      name,
-		expiresAt: time.Now().Add(groupNameCacheTTL),
-	})
-}
-
-// invalidateCachedGroupName drops the name one device cached for a group, so
-// the next lookup by that device reads the current subject.
-func invalidateCachedGroupName(deviceID, groupJID string) {
-	if deviceID == "" {
-		return
-	}
-	groupNameCache.Delete(groupNameCacheKey{deviceID: deviceID, groupJID: groupJID})
-}
-
-// beginGroupNameCacheFetch reserves a unique cache value before the network
-// read. Deleting or replacing that value prevents an older fetch from caching
-// a name after a subject-change event invalidated it.
-func beginGroupNameCacheFetch(deviceID, groupJID string) func(string) {
-	if deviceID == "" {
-		return func(string) {}
-	}
-	key := groupNameCacheKey{deviceID: deviceID, groupJID: groupJID}
-	pending := groupNameCacheEntry{fetchToken: new(int)}
-	groupNameCache.Store(key, pending)
-	return func(name string) {
-		if name == "" {
-			groupNameCache.CompareAndDelete(key, pending)
-			return
-		}
-		groupNameCache.CompareAndSwap(key, pending, groupNameCacheEntry{
-			name: name, expiresAt: time.Now().Add(groupNameCacheTTL),
-		})
-	}
-}
 
 // getContactMutex returns a mutex for the given phone number to serialize contact operations.
 // Uses FNV-1a hash to distribute phones across shards for balanced lock contention.
@@ -921,6 +826,9 @@ func (r *chatwootReplyTarget) apply(conversationID int, content string, opts *ch
 		return content
 	}
 	if r.link != nil && r.link.ChatwootConversationID == conversationID {
+		// The next delivery attempt may need to apply the original attributes
+		// to a different conversation.
+		opts.ContentAttributes = maps.Clone(opts.ContentAttributes)
 		opts.ContentAttributes["in_reply_to"] = r.link.ChatwootMessageID
 		return content
 	}
@@ -1107,28 +1015,61 @@ func structuredContactsArraySummary(contacts []webhookContactPayload) string {
 	return utils.FormatContactSummary(first.DisplayName, first.PhoneNumber, true)
 }
 
-// syncMessageToChatwoot creates or finds contact/conversation and sends the message.
-func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, content string, attachments []string, opts chatwoot.MessageOptions, reply *chatwootReplyTarget) (*chatwootSyncResult, error) {
+func deliveredChatwootReplyLink(resolved *chatwoot.ResolvedConfig, deviceID, chatJID string, repo domainChatStorage.IChatStorageRepository, reply *chatwootReplyTarget) (*domainChatStorage.ChatwootMessageLink, error) {
+	cw := resolved.Client
+	if reply != nil {
+		link := reply.link
+		if link != nil && link.DeviceID == deviceID && link.WhatsAppChatJID == chatJID &&
+			link.ChatwootConfigID == resolved.ConfigID && link.ChatwootAccountID == cw.AccountID && link.ChatwootInboxID == cw.InboxID &&
+			link.Direction == "outgoing" && link.ChatwootMessageID > 0 && link.ChatwootConversationID > 0 && !strings.HasPrefix(link.SourceID, "WAID:") {
+			return link, nil
+		}
+	}
+	return latestDeliveredChatwootReply(repo, deviceID, chatJID, resolved.ConfigID, cw.AccountID, cw.InboxID)
+}
+
+func findChatwootConversation(resolved *chatwoot.ResolvedConfig, info *chatwootContactInfo, deviceID string, linkRepo domainChatStorage.IChatStorageRepository, reply *chatwootReplyTarget) (conversationID int, fromLink bool, err error) {
 	// Lock per-identifier mutex to prevent duplicate contact/conversation creation
 	mu := getContactMutex(info.Identifier)
 	mu.Lock()
+	defer mu.Unlock()
 
-	contact, err := cw.FindOrCreateContact(info.Name, info.Identifier, info.IsGroup)
+	cw := resolved.Client
+	contact, err := cw.FindContactByIdentifier(info.Identifier, info.IsGroup)
 	if err != nil {
-		mu.Unlock()
-		return nil, fmt.Errorf("failed to find/create contact for %s: %w", info.Identifier, err)
+		return 0, false, fmt.Errorf("failed to find/create contact for %s: %w", info.Identifier, err)
+	}
+	if contact == nil && linkRepo != nil && deviceID != "" && !info.IsFromMe && !info.IsGroup &&
+		strings.HasSuffix(info.ChatJID, "@"+types.DefaultUserServer) && !strings.HasSuffix(info.Identifier, "@"+types.HiddenUserServer) {
+		link, err := deliveredChatwootReplyLink(resolved, deviceID, info.ChatJID, linkRepo, reply)
+		if err != nil {
+			return 0, false, fmt.Errorf("failed to look up delivered Chatwoot reply: %w", err)
+		}
+		if link != nil {
+			contact, err = cw.ContactForConversation(link.ChatwootConversationID)
+			if err != nil {
+				return 0, false, fmt.Errorf("failed to resolve linked Chatwoot contact: %w", err)
+			}
+			fromLink = contact != nil
+		}
+	}
+	contact, err = cw.ReuseOrCreateContact(info.Name, info.Identifier, info.IsGroup, contact)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to find/create contact for %s: %w", info.Identifier, err)
 	}
 	logrus.Infof("Chatwoot: Contact ID: %d", contact.ID)
 
 	conversation, err := cw.FindOrCreateConversation(contact.ID, info.ChatJID)
-	mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("failed to find/create conversation for contact %d: %w", contact.ID, err)
+		return 0, fromLink, fmt.Errorf("failed to find/create conversation for contact %d: %w", contact.ID, err)
 	}
-	logrus.Infof("Chatwoot: Conversation ID: %d", conversation.ID)
-	content = reply.apply(conversation.ID, content, &opts)
+	return conversation.ID, fromLink, nil
+}
 
-	logrus.Infof("Chatwoot: Creating message (Length: %d, Attachments: %d)", len(content), len(attachments))
+// syncMessageToChatwoot creates or finds contact/conversation and sends the message.
+func syncMessageToChatwoot(resolved *chatwoot.ResolvedConfig, info *chatwootContactInfo, content string, attachments []string, opts chatwoot.MessageOptions, reply *chatwootReplyTarget, deviceID string, linkRepo domainChatStorage.IChatStorageRepository) (*chatwootSyncResult, error) {
+	cw := resolved.Client
+
 	messageType := "incoming"
 	if info.IsFromMe {
 		messageType = "outgoing"
@@ -1137,16 +1078,36 @@ func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, conte
 	for _, path := range attachments {
 		messageAttachments = append(messageAttachments, chatwoot.MessageAttachment{Path: path, FileName: utils.StoredMediaDisplayName(path)})
 	}
-	msgID, err := cw.CreateMessage(conversation.ID, content, messageType, messageAttachments, opts)
+	post := func(conversationID int) (int, error) {
+		logrus.Infof("Chatwoot: Conversation ID: %d", conversationID)
+		attemptOpts := opts
+		body := reply.apply(conversationID, content, &attemptOpts)
+		logrus.Infof("Chatwoot: Creating message (Length: %d, Attachments: %d)", len(body), len(attachments))
+		return cw.CreateMessage(conversationID, body, messageType, messageAttachments, attemptOpts)
+	}
+	conversationID, fromLink, err := findChatwootConversation(resolved, info, deviceID, linkRepo, reply)
+	var msgID int
+	if err == nil {
+		msgID, err = post(conversationID)
+	}
+	var statusErr *chatwoot.HTTPStatusError
+	if fromLink && errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+		// Resolve normally once after a stale selection or post. Looking up
+		// the same delivered link again can select the missing route.
+		conversationID, _, err = findChatwootConversation(resolved, info, deviceID, nil, nil)
+		if err == nil {
+			msgID, err = post(conversationID)
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create message: %w", err)
+		return nil, fmt.Errorf("failed to forward message: %w", err)
 	}
 	chatwoot.MarkMessageAsSent(cw.AccountID, msgID)
 
 	logrus.Infof("Chatwoot: Message synced successfully for %s", info.Identifier)
 	return &chatwootSyncResult{
 		MessageID:      msgID,
-		ConversationID: conversation.ID,
+		ConversationID: conversationID,
 		InboxID:        cw.InboxID,
 	}, nil
 }
@@ -1868,7 +1829,11 @@ func syncPayloadToChatwoot(ctx context.Context, payload map[string]any, eventNam
 		}
 	}
 
-	result, err := syncMessageToChatwoot(cw, info, content, attachments, msgOpts, reply)
+	var deliveredLinkRepo domainChatStorage.IChatStorageRepository
+	if eventName == EventTypeMessage {
+		deliveredLinkRepo = linkRepo
+	}
+	result, err := syncMessageToChatwoot(resolved, info, content, attachments, msgOpts, reply, deviceID, deliveredLinkRepo)
 	if err != nil {
 		return err
 	}
@@ -2024,53 +1989,14 @@ func eventInList(events []string, eventName string) bool {
 	return false
 }
 
-// getGroupName fetches the group name from WhatsApp using the group JID.
-// Uses a per-device TTL cache to avoid repeated API calls for the same group.
+// getGroupName keeps the Chatwoot path scoped to an explicit device context.
 func getGroupName(ctx context.Context, groupJID string) string {
-	instance, ok := DeviceFromContext(ctx)
-	if !ok || instance == nil {
+	if instance, ok := DeviceFromContext(ctx); !ok || instance == nil {
 		return ""
 	}
-	client := instance.GetClient()
-	if client == nil || groupNameCacheDeviceID(client) == "" {
-		return ""
-	}
-
-	// Check this device's cache first. The name is only ever served to the
-	// device that fetched it.
-	deviceID := groupNameCacheDeviceID(client)
-	if name, ok := getCachedGroupName(deviceID, groupJID); ok {
-		logrus.Debugf("Chatwoot: Using cached group name for %s: %s", groupJID, name)
-		return name
-	}
-
 	jid, err := types.ParseJID(groupJID)
 	if err != nil {
-		logrus.Warnf("Chatwoot: Failed to parse group JID %s: %v", groupJID, err)
 		return ""
 	}
-
-	// Use a fresh context with timeout since the original context may be canceled
-	// (this function is called from a goroutine)
-	freshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cacheResult := beginGroupNameCacheFetch(deviceID, groupJID)
-	defer cacheResult("")
-
-	logrus.Debugf("Chatwoot: Fetching group info for %s", groupJID)
-	groupInfo, err := fetchGroupInfoFn(freshCtx, client, jid)
-	if err != nil {
-		logrus.Warnf("Chatwoot: Failed to get group info for %s: %v", groupJID, err)
-		return ""
-	}
-
-	if groupInfo != nil && groupInfo.Name != "" {
-		logrus.Infof("Chatwoot: Got group name: %s", groupInfo.Name)
-		// Cache the result
-		cacheResult(groupInfo.Name)
-		return groupInfo.Name
-	}
-
-	logrus.Debug("Chatwoot: GroupInfo is nil or Name is empty")
-	return ""
+	return ResolveGroupSubject(context.WithoutCancel(ctx), jid)
 }
