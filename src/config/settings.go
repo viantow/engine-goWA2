@@ -7,11 +7,11 @@ import (
 )
 
 var (
-	AppVersion             = ""
+	AppVersion             = "v9.11.0"
 	AppPort                = "3000"
 	AppHost                = "0.0.0.0"
 	AppDebug               = false
-	AppOs                  = "IWANA"
+	AppOs                  = "GOWA"
 	AppPlatform            = waCompanionReg.DeviceProps_PlatformType(1)
 	AppBasicAuthCredential []string
 	// AppAllowUnauthenticated exposes device admin, send, logout, and MCP
@@ -98,12 +98,6 @@ var (
 	ChatStorageEnableForeignKeys = true
 	ChatStorageEnableWAL         = true
 	ChatStorageMaxOpenConns      = 5 // Max concurrent SQLite connections for chat storage (WAL allows concurrent readers + 1 writer)
-
-	// Zero-storage privacy invariants (do not let upstream sync revert these).
-	// IWANA never persists chat content, contacts/phone numbers, or history dumps.
-	WhatsappDisableMessageStorage = true // incoming & outgoing messages/reactions are NOT persisted
-	WhatsappDisableHistorySync    = true // history sync dumps (*.json) and processing are bypassed
-	WhatsappDisableContactStorage = true // contacts are in-memory only, never persisted
 
 	ChatwootEnabled   = false
 	ChatwootURL       = ""

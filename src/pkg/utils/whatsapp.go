@@ -1312,12 +1312,30 @@ const maxPhoneNumberLength = 15 // Maximum digits in a phone number
 
 func SanitizePhone(phone *string) {
 	if phone != nil && len(*phone) > 0 && !strings.Contains(*phone, "@") {
-		if len(*phone) <= maxPhoneNumberLength {
+		// A leading + is not a digit; counting it would turn a 15-digit +number into a group.
+		if len(strings.TrimPrefix(*phone, "+")) <= maxPhoneNumberLength {
 			*phone = fmt.Sprintf("%s%s", *phone, config.WhatsappTypeUser)
 		} else {
 			*phone = fmt.Sprintf("%s%s", *phone, config.WhatsappTypeGroup)
 		}
 	}
+}
+
+// ParsePhoneJID accepts phone numbers and phone JIDs for registration lookups.
+// Unlike SanitizePhone, a long number is never inferred to be a group.
+func ParsePhoneJID(phone string) (types.JID, error) {
+	phone = strings.TrimSpace(phone)
+	jid, err := ParseJID(phone)
+	if err != nil {
+		return types.EmptyJID, err
+	}
+	if jid.Server != types.DefaultUserServer || strings.Count(phone, "@") > 1 {
+		return types.EmptyJID, errors.New("expected a phone number or an @s.whatsapp.net user JID")
+	}
+	if len(jid.User) == 0 || len(jid.User) > maxPhoneNumberLength || strings.Trim(jid.User, "0123456789") != "" {
+		return types.EmptyJID, fmt.Errorf("phone number must contain 1 to %d digits", maxPhoneNumberLength)
+	}
+	return jid.ToNonAD(), nil
 }
 
 // whatsappLookup is the part of *whatsmeow.Client that ResolveOnWhatsapp uses.
